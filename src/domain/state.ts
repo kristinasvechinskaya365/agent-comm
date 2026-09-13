@@ -256,6 +256,11 @@ export class StateService {
   ): StateVersion {
     this.assertCanAdvance(current.generation);
     const generation = current.generation + 1;
+    // better-sqlite3 binds JavaScript numbers as REAL. The storage schema uses
+    // no-affinity columns so it can reject integral REAL inputs without SQLite
+    // coercing them; bind server-owned counters as int64 via bigint instead.
+    const storedGeneration = BigInt(generation);
+    const storedCurrentGeneration = BigInt(current.generation);
     let changes: number;
 
     if (transition.type === 'set') {
@@ -270,7 +275,7 @@ export class StateService {
             transition.value,
             transition.updatedBy,
             transition.expiresAt,
-            generation,
+            storedGeneration,
           ],
         ).changes;
       } else {
@@ -283,10 +288,10 @@ export class StateService {
             transition.value,
             transition.updatedBy,
             transition.expiresAt,
-            generation,
+            storedGeneration,
             namespace,
             key,
-            current.generation,
+            storedCurrentGeneration,
           ],
         ).changes;
       }
@@ -295,7 +300,7 @@ export class StateService {
         `INSERT INTO state
            (namespace, key, value, updated_by, expires_at, generation, present)
          VALUES (?, ?, '', '', NULL, ?, 0)`,
-        [namespace, key, generation],
+        [namespace, key, storedGeneration],
       ).changes;
     } else {
       changes = this.db.run(
@@ -303,7 +308,7 @@ export class StateService {
          SET value = '', updated_by = '', updated_at = datetime('now'), expires_at = NULL,
              generation = ?, present = 0
          WHERE namespace = ? AND key = ? AND generation = ?`,
-        [generation, namespace, key, current.generation],
+        [storedGeneration, namespace, key, storedCurrentGeneration],
       ).changes;
     }
 
@@ -380,7 +385,7 @@ export class StateService {
     }
 
     let expiresAt: string | null = null;
-    if (ttlSeconds !== undefined && ttlSeconds !== null) {
+    if (ttlSeconds !== undefined) {
       if (typeof ttlSeconds !== 'number' || !Number.isFinite(ttlSeconds) || ttlSeconds <= 0) {
         throw new ValidationError('ttl_seconds must be a positive number.');
       }

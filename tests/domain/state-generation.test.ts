@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createContext, type AppContext } from '../../src/context.js';
+import type { StateTransitionIntent } from '../../src/types.js';
 
 interface VersionedState {
   generation: number;
@@ -80,6 +81,45 @@ function createLegacyV6Database(path: string): void {
     CREATE INDEX idx_state_expires ON state(expires_at) WHERE expires_at IS NOT NULL;
     INSERT INTO state (namespace, key, value, updated_by)
     VALUES ('legacy', 'key', 'preserved', 'legacy-owner');
+  `);
+  db.close();
+}
+
+function createLegacyV7Database(path: string): void {
+  const db = new Database(path);
+  db.exec(`
+    CREATE TABLE _meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    INSERT INTO _meta (key, value) VALUES ('schema_version', '7');
+    CREATE TABLE agents (
+      id TEXT PRIMARY KEY,
+      status TEXT NOT NULL,
+      last_heartbeat TEXT NOT NULL
+    );
+    CREATE TABLE channels (id TEXT PRIMARY KEY, archived_at TEXT);
+    CREATE TABLE channel_members (channel_id TEXT, agent_id TEXT);
+    CREATE TABLE messages (id INTEGER PRIMARY KEY, created_at TEXT NOT NULL);
+    CREATE TABLE message_reads (message_id INTEGER NOT NULL);
+    CREATE TABLE feed_events (id INTEGER PRIMARY KEY, created_at TEXT NOT NULL);
+    CREATE TABLE state (
+      namespace TEXT NOT NULL DEFAULT 'default',
+      key TEXT NOT NULL,
+      value TEXT NOT NULL,
+      updated_by TEXT NOT NULL,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      expires_at TEXT,
+      generation INTEGER NOT NULL DEFAULT 1
+        CHECK (typeof(generation) = 'integer' AND generation BETWEEN 1 AND 9007199254740991),
+      present INTEGER NOT NULL DEFAULT 1 CHECK (present IN (0, 1)),
+      PRIMARY KEY (namespace, key)
+    );
+    CREATE INDEX idx_state_namespace ON state(namespace);
+    CREATE INDEX idx_state_expires ON state(expires_at) WHERE expires_at IS NOT NULL;
+    CREATE INDEX idx_state_present_namespace ON state(present, namespace, key);
+    INSERT INTO state
+      (namespace, key, value, updated_by, updated_at, expires_at, generation, present)
+    VALUES
+      ('legacy-v7', 'live', 'preserved', 'legacy-owner', '9999-01-01 00:00:00', NULL, 5, 1),
+      ('legacy-v7', 'tombstone', '', '', '9999-01-02 00:00:00', NULL, 8, 0);
   `);
   db.close();
 }
@@ -198,6 +238,52 @@ describe('StateService generation and tombstones', () => {
     expect(ctx.state.getVersioned('leases', 'camera')).toEqual(foreign);
   });
 
+  it('rejects every invalid runtime typed-set TTL without mutating generation', () => {
+    const invalidTtls: unknown[] = [
+      null,
+      0,
+      -1,
+      NaN,
+      Infinity,
+      -Infinity,
+      '60',
+      true,
+      {},
+      [],
+      8_640_000_000_000,
+    ];
+
+    for (const ttlSeconds of invalidTtls) {
+      const intent = {
+        type: 'set',
+        value: 'invalid',
+        updatedBy: ownerA,
+        ttlSeconds,
+      } as unknown as StateTransitionIntent;
+      expect(() => ctx.state.compareGeneration('ttl-library', 'key', 0, intent)).toThrow(
+        'ttl_seconds',
+      );
+      expect(ctx.state.getVersioned('ttl-library', 'key')).toEqual(ABSENT_ZERO);
+    }
+
+    const omitted = ctx.state.compareGeneration('ttl-library', 'key', 0, {
+      type: 'set',
+      value: 'without-ttl',
+      updatedBy: ownerA,
+    }) as TransitionResult;
+    expectVersion(omitted.successor, 1, { value: 'without-ttl', updatedBy: ownerA });
+    expect(omitted.successor.entry?.expires_at).toBeNull();
+
+    const positive = ctx.state.compareGeneration('ttl-library', 'key', 1, {
+      type: 'set',
+      value: 'with-ttl',
+      updatedBy: ownerA,
+      ttlSeconds: 60,
+    }) as TransitionResult;
+    expectVersion(positive.successor, 2, { value: 'with-ttl', updatedBy: ownerA });
+    expect(positive.successor.entry?.expires_at).toBeTruthy();
+  });
+
   it('refreshes the same value as one new generation', () => {
     ctx.state.set('leases', 'camera', 'owner-a', ownerA);
     const refreshed = ctx.state.compareGeneration('leases', 'camera', 1, {
@@ -311,7 +397,7 @@ describe('StateService generation and tombstones', () => {
   it('fails closed at generation exhaustion and rejects invalid expected generations', () => {
     ctx.state.set('limits', 'key', 'held', ownerA);
     ctx.db.run(`UPDATE state SET generation = ? WHERE namespace = 'limits' AND key = 'key'`, [
-      Number.MAX_SAFE_INTEGER,
+      BigInt(Number.MAX_SAFE_INTEGER),
     ]);
 
     expect(() =>
@@ -343,6 +429,85 @@ describe('StateService generation and tombstones', () => {
 });
 
 describe('state generation durability and migration', () => {
+  it('enforces no-coercion integer storage for generation and presence', () => {
+    const ctx = createContext({ path: ':memory:' });
+    try {
+      const columns = ctx.db.raw.prepare(`PRAGMA table_info(state)`).all() as Array<{
+        name: string;
+        type: string;
+      }>;
+      expect(columns.find((column) => column.name === 'generation')?.type).toBe('');
+      expect(columns.find((column) => column.name === 'present')?.type).toBe('');
+
+      const insert = ctx.db.raw.prepare(
+        `INSERT INTO state
+           (namespace, key, value, updated_by, generation, present)
+         VALUES ('storage-contract', ?, 'value', 'owner', ?, ?)`,
+      );
+      const insertRealGeneration = ctx.db.raw.prepare(
+        `INSERT INTO state
+           (namespace, key, value, updated_by, generation, present)
+         VALUES ('storage-contract', ?, 'value', 'owner', CAST(? AS REAL), ?)`,
+      );
+      const insertRealPresence = ctx.db.raw.prepare(
+        `INSERT INTO state
+           (namespace, key, value, updated_by, generation, present)
+         VALUES ('storage-contract', ?, 'value', 'owner', ?, CAST(? AS REAL))`,
+      );
+
+      const invalidDirectBinds: Array<[string, unknown, unknown]> = [
+        ['text-generation', '2', 1n],
+        ['text-presence', 2n, '0'],
+        ['integral-real-generation', 2, 1n],
+        ['integral-real-presence', 2n, 0],
+        ['fractional-generation', 2.5, 1n],
+        ['fractional-presence', 2n, 0.5],
+        ['zero-generation', 0n, 1n],
+        ['negative-generation', -1n, 1n],
+        ['overflow-generation', 9_007_199_254_740_992n, 1n],
+        ['negative-presence', 2n, -1n],
+        ['large-presence', 2n, 2n],
+        ['null-generation', null, 1n],
+        ['null-presence', 2n, null],
+        ['blob-generation', Buffer.from('2'), 1n],
+        ['blob-presence', 2n, Buffer.from('1')],
+        ['boolean-generation', true, 1n],
+        ['boolean-presence', 2n, false],
+      ];
+      for (const [key, generation, present] of invalidDirectBinds) {
+        expect(() => insert.run(key, generation, present), key).toThrow();
+      }
+      expect(() => insertRealGeneration.run('cast-real-generation', 2n, 1n)).toThrow();
+      expect(() => insertRealPresence.run('cast-real-presence', 2n, 1n)).toThrow();
+
+      expect(() => insert.run('minimum', 1n, 0n)).not.toThrow();
+      expect(() => insert.run('maximum', 9_007_199_254_740_991n, 1n)).not.toThrow();
+      expect(
+        ctx.db.raw
+          .prepare(
+            `SELECT key, typeof(generation) AS generation_type,
+                    typeof(present) AS present_type
+             FROM state WHERE namespace = 'storage-contract' ORDER BY key`,
+          )
+          .all(),
+      ).toEqual([
+        { key: 'maximum', generation_type: 'integer', present_type: 'integer' },
+        { key: 'minimum', generation_type: 'integer', present_type: 'integer' },
+      ]);
+
+      ctx.state.set('storage-server', 'key', 'one', 'owner');
+      expect(ctx.state.delete('storage-server', 'key')).toBe(true);
+      const recreated = ctx.state.compareGeneration('storage-server', 'key', 2, {
+        type: 'set',
+        value: 'three',
+        updatedBy: 'owner',
+      });
+      expectVersion(recreated.successor, 3, { value: 'three', updatedBy: 'owner' });
+    } finally {
+      ctx.close();
+    }
+  });
+
   it('atomically migrates a v6 live row to generation one and remains idempotent', () => {
     const dir = mkdtempSync(join(tmpdir(), 'agent-comm-v6-'));
     const path = join(dir, 'legacy.db');
@@ -358,8 +523,79 @@ describe('state generation durability and migration', () => {
           ctx.db.queryOne<{ value: string }>(
             `SELECT value FROM _meta WHERE key = 'schema_version'`,
           ),
-        ).toEqual({ value: '7' });
+        ).toEqual({ value: '8' });
         ctx.close();
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('atomically migrates the v7 candidate without losing rows, history, or indexes', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'agent-comm-v7-'));
+    const path = join(dir, 'candidate.db');
+    try {
+      createLegacyV7Database(path);
+      for (let open = 0; open < 2; open++) {
+        const ctx = createContext({ path });
+        expectVersion(ctx.state.getVersioned('legacy-v7', 'live'), 5, {
+          value: 'preserved',
+          updatedBy: 'legacy-owner',
+        });
+        expect(ctx.state.getVersioned('legacy-v7', 'tombstone')).toEqual({
+          generation: 8,
+          present: false,
+          entry: null,
+        });
+        expect(
+          ctx.db.raw
+            .prepare(
+              `SELECT key, value, updated_by, updated_at, expires_at, generation, present
+               FROM state WHERE namespace = 'legacy-v7' ORDER BY key`,
+            )
+            .all(),
+        ).toEqual([
+          {
+            key: 'live',
+            value: 'preserved',
+            updated_by: 'legacy-owner',
+            updated_at: '9999-01-01 00:00:00',
+            expires_at: null,
+            generation: 5,
+            present: 1,
+          },
+          {
+            key: 'tombstone',
+            value: '',
+            updated_by: '',
+            updated_at: '9999-01-02 00:00:00',
+            expires_at: null,
+            generation: 8,
+            present: 0,
+          },
+        ]);
+        expect(
+          ctx.db.raw.prepare(`SELECT name FROM pragma_index_list('state') ORDER BY name`).all(),
+        ).toEqual([
+          { name: 'idx_state_expires' },
+          { name: 'idx_state_namespace' },
+          { name: 'idx_state_present_namespace' },
+          { name: 'sqlite_autoindex_state_1' },
+        ]);
+        expect(
+          ctx.db.queryOne<{ value: string }>(
+            `SELECT value FROM _meta WHERE key = 'schema_version'`,
+          ),
+        ).toEqual({ value: '8' });
+        ctx.close();
+
+        // Simulate a crash after the schema transaction committed but before
+        // the migration runner recorded v8; the next open must safely rerun it.
+        if (open === 0) {
+          const rerun = new Database(path);
+          rerun.prepare(`UPDATE _meta SET value = '7' WHERE key = 'schema_version'`).run();
+          rerun.close();
+        }
       }
     } finally {
       rmSync(dir, { recursive: true, force: true });

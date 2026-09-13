@@ -9,8 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Server-owned state generations and durable tombstones.** Every successful state set, value-CAS, delete, TTL expiry, namespace deletion, and cleanup transition now advances one shared safe-integer generation without accepting a client-supplied generation. Schema migration v7 maps existing live rows to generation 1 without deleting data.
+- **Server-owned state generations and durable tombstones.** Every successful state set, value-CAS, delete, TTL expiry, namespace deletion, and cleanup transition now advances one shared safe-integer generation without accepting a client-supplied generation. Schema migration v7 maps existing live rows to generation 1 without deleting data; migration v8 preserves that history while enforcing no-coercion integer storage for generation and presence.
 - **Versioned state APIs.** REST adds `GET /api/state/v2/:namespace/:key` and `POST /api/state/v2/:namespace/:key/cas`; MCP `comm_state` adds `get_v2` and `cas_v2`. Generation CAS returns exact predecessor/successor state and leaves foreign replacements untouched on mismatch.
+
+### Fixed
+
+- Direct SQL writes now reject numeric text, REAL, BLOB, null, out-of-range, and invalid-presence values instead of allowing SQLite integer affinity to normalize them before validation.
+- Library generation-CAS rejects a runtime `ttlSeconds: null`; only an absent or `undefined` TTL means no expiry.
 
 ### Compatibility
 

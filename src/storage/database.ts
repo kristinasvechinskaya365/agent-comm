@@ -238,4 +238,47 @@ const migrations: Migration[] = [
       }).immediate();
     },
   },
+  {
+    // INTEGER affinity converts numeric TEXT and integral REAL values before a
+    // CHECK sees them. Rebuild with no declared type (BLOB affinity) so the
+    // typeof checks enforce the storage class originally supplied to SQLite.
+    version: 8,
+    up: (db: Database.Database) => {
+      db.transaction(() => {
+        db.exec(`
+          DROP TABLE IF EXISTS state_v8;
+          CREATE TABLE state_v8 (
+            namespace TEXT NOT NULL DEFAULT 'default',
+            key TEXT NOT NULL,
+            value TEXT NOT NULL,
+            updated_by TEXT NOT NULL,
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            expires_at TEXT,
+            generation NOT NULL DEFAULT 1
+              CHECK (
+                typeof(generation) = 'integer'
+                AND generation BETWEEN 1 AND 9007199254740991
+              ),
+            present NOT NULL DEFAULT 1
+              CHECK (typeof(present) = 'integer' AND present IN (0, 1)),
+            PRIMARY KEY (namespace, key)
+          );
+
+          INSERT INTO state_v8
+            (namespace, key, value, updated_by, updated_at, expires_at, generation, present)
+          SELECT namespace, key, value, updated_by, updated_at, expires_at, generation, present
+          FROM state;
+
+          DROP TABLE state;
+          ALTER TABLE state_v8 RENAME TO state;
+
+          CREATE INDEX idx_state_namespace ON state(namespace);
+          CREATE INDEX idx_state_expires
+            ON state(expires_at) WHERE expires_at IS NOT NULL;
+          CREATE INDEX idx_state_present_namespace
+            ON state(present, namespace, key);
+        `);
+      }).immediate();
+    },
+  },
 ];
