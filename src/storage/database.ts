@@ -211,4 +211,31 @@ const migrations: Migration[] = [
       `);
     },
   },
+  {
+    version: 7,
+    up: (db: Database.Database) => {
+      db.transaction(() => {
+        const cols = db.prepare(`PRAGMA table_info(state)`).all() as Array<{ name: string }>;
+        if (!cols.some((column) => column.name === 'generation')) {
+          db.exec(`
+            ALTER TABLE state ADD COLUMN generation INTEGER NOT NULL DEFAULT 1
+              CHECK (
+                typeof(generation) = 'integer'
+                AND generation BETWEEN 1 AND 9007199254740991
+              )
+          `);
+        }
+        if (!cols.some((column) => column.name === 'present')) {
+          db.exec(`
+            ALTER TABLE state ADD COLUMN present INTEGER NOT NULL DEFAULT 1
+              CHECK (present IN (0, 1))
+          `);
+        }
+        db.exec(`
+          CREATE INDEX IF NOT EXISTS idx_state_present_namespace
+          ON state(present, namespace, key)
+        `);
+      }).immediate();
+    },
+  },
 ];

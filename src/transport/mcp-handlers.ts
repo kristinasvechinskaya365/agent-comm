@@ -9,12 +9,16 @@ import type { Skill } from '../types.js';
 import { NotFoundError, ValidationError } from '../types.js';
 import {
   requireString,
+  requireStringValue,
+  requireSafeNonNegativeInteger,
   optString,
   optNumber,
+  optPositiveNumber,
   optImportance,
   optStatus,
   optStringOrNull,
   optBoolean,
+  rejectUnknownFields,
 } from './mcp-validation.js';
 
 // ---------------------------------------------------------------------------
@@ -432,18 +436,13 @@ export const toolHandlers: Record<string, ToolHandlerFn> = {
 
     switch (action) {
       case 'set': {
+        const namespace = optString(args, 'namespace') ?? 'default';
+        const key = requireString(args, 'key');
+        const value = requireString(args, 'value');
+        const ttl = optPositiveNumber(args, 'ttl_seconds');
         const self = agent.require();
         ctx.rateLimiter.check(self.id);
-        const ttlRaw = args.ttl_seconds;
-        const ttl =
-          typeof ttlRaw === 'number' && Number.isFinite(ttlRaw) && ttlRaw > 0 ? ttlRaw : undefined;
-        const entry = ctx.state.set(
-          optString(args, 'namespace') ?? 'default',
-          requireString(args, 'key'),
-          requireString(args, 'value'),
-          self.id,
-          ttl,
-        );
+        const entry = ctx.state.set(namespace, key, value, self.id, ttl);
         ctx.agents.touchActivity(self.id);
         ctx.feed.logInternal(
           self.id,
@@ -472,26 +471,72 @@ export const toolHandlers: Record<string, ToolHandlerFn> = {
       }
 
       case 'cas': {
+        const ns = optString(args, 'namespace') ?? 'default';
+        const key = requireString(args, 'key');
+        const expected = optStringOrNull(args, 'expected');
+        const newValue = requireStringValue(args, 'new_value');
+        const ttl = optPositiveNumber(args, 'ttl_seconds');
         const self = agent.require();
         ctx.rateLimiter.check(self.id);
-        const ns = optString(args, 'namespace') ?? 'default';
-        const ttl =
-          typeof args.ttl_seconds === 'number' && Number.isFinite(args.ttl_seconds)
-            ? (args.ttl_seconds as number)
-            : undefined;
-        const swapped = ctx.state.compareAndSwap(
-          ns,
+        return {
+          swapped: ctx.state.compareAndSwap(ns, key, expected, newValue, self.id, ttl),
+        };
+      }
+
+      case 'get_v2': {
+        rejectUnknownFields(args, new Set(['action', 'namespace', 'key']));
+        agent.require();
+        return ctx.state.getVersioned(
+          optString(args, 'namespace') ?? 'default',
           requireString(args, 'key'),
-          optStringOrNull(args, 'expected'),
-          requireString(args, 'new_value'),
-          self.id,
-          ttl,
         );
-        return { swapped };
+      }
+
+      case 'cas_v2': {
+        const namespace = optString(args, 'namespace') ?? 'default';
+        const key = requireString(args, 'key');
+        const generation = requireSafeNonNegativeInteger(args, 'expected_generation');
+        const operation = requireString(args, 'operation');
+        if (operation === 'delete') {
+          rejectUnknownFields(
+            args,
+            new Set(['action', 'namespace', 'key', 'expected_generation', 'operation']),
+          );
+          const self = agent.require();
+          ctx.rateLimiter.check(self.id);
+          return ctx.state.compareGeneration(namespace, key, generation, { type: 'delete' });
+        }
+        if (operation !== 'set') {
+          throw new ValidationError('"operation" must be "set" or "delete".');
+        }
+        rejectUnknownFields(
+          args,
+          new Set([
+            'action',
+            'namespace',
+            'key',
+            'expected_generation',
+            'operation',
+            'value',
+            'ttl_seconds',
+          ]),
+        );
+        const value = requireStringValue(args, 'value');
+        const ttl = optPositiveNumber(args, 'ttl_seconds');
+        const self = agent.require();
+        ctx.rateLimiter.check(self.id);
+        return ctx.state.compareGeneration(namespace, key, generation, {
+          type: 'set',
+          value,
+          updatedBy: self.id,
+          ttlSeconds: ttl,
+        });
       }
 
       default:
-        throw new ValidationError(`Unknown action "${action}". Valid: set, get, list, delete, cas`);
+        throw new ValidationError(
+          `Unknown action "${action}". Valid: set, get, list, delete, cas, get_v2, cas_v2`,
+        );
     }
   },
 };

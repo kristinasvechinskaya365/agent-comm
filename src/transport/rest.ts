@@ -181,6 +181,10 @@ export function createRouter(ctx: AppContext): (req: IncomingMessage, res: Serve
     json(res, entry);
   });
 
+  route('GET', '/api/state/v2/:namespace/:key', (_req, res, params) => {
+    json(res, ctx.state.getVersioned(params.namespace, params.key));
+  });
+
   route('GET', '/api/feed', (req, res) => {
     const url = new URL(req.url!, `http://${req.headers.host}`);
     const agent = url.searchParams.get('agent') ?? undefined;
@@ -326,6 +330,30 @@ export function createRouter(ctx: AppContext): (req: IncomingMessage, res: Serve
     }
   }
 
+  function optionalTtlSeconds(body: Record<string, unknown>): number | undefined {
+    const ttl = body.ttl_seconds;
+    if (ttl === undefined) return undefined;
+    if (typeof ttl !== 'number' || !Number.isFinite(ttl) || ttl <= 0) {
+      throw new ValidationError('"ttl_seconds" must be a positive number.');
+    }
+    return ttl;
+  }
+
+  function expectedGeneration(body: Record<string, unknown>): number {
+    const generation = body.expected_generation;
+    if (!Number.isSafeInteger(generation) || (generation as number) < 0) {
+      throw new ValidationError(
+        '"expected_generation" must be a safe integer between 0 and Number.MAX_SAFE_INTEGER.',
+      );
+    }
+    return generation as number;
+  }
+
+  function rejectUnknownFields(body: Record<string, unknown>, allowed: Set<string>): void {
+    const unknown = Object.keys(body).find((field) => !allowed.has(field));
+    if (unknown) throw new ValidationError(`Unknown field: "${unknown}".`);
+  }
+
   /** Validate and send a message from body fields on behalf of a resolved sender. */
   function processSendMessage(
     res: ServerResponse,
@@ -411,15 +439,18 @@ export function createRouter(ctx: AppContext): (req: IncomingMessage, res: Serve
     const body = await readBody(req);
     const value = body.value as string | undefined;
     const updatedBy = body.updated_by as string | undefined;
-    const ttlRaw = body.ttl_seconds;
-    const ttl =
-      typeof ttlRaw === 'number' && Number.isFinite(ttlRaw) && ttlRaw > 0 ? ttlRaw : undefined;
 
     if (typeof value !== 'string') return json(res, { error: '"value" is required' }, 400);
     if (!updatedBy || typeof updatedBy !== 'string')
       return json(res, { error: '"updated_by" (agent ID) is required' }, 400);
 
-    const entry = ctx.state.set(params.namespace, params.key, value, updatedBy, ttl);
+    const entry = ctx.state.set(
+      params.namespace,
+      params.key,
+      value,
+      updatedBy,
+      optionalTtlSeconds(body),
+    );
     json(res, entry);
   });
 
@@ -438,9 +469,6 @@ export function createRouter(ctx: AppContext): (req: IncomingMessage, res: Serve
     const expected = body.expected === null ? null : (body.expected as string | undefined);
     const newValue = body.new_value as string | undefined;
     const updatedBy = body.updated_by as string | undefined;
-    const ttlRaw = body.ttl_seconds;
-    const ttl =
-      typeof ttlRaw === 'number' && Number.isFinite(ttlRaw) && ttlRaw > 0 ? ttlRaw : undefined;
 
     if (typeof newValue !== 'string') return json(res, { error: '"new_value" is required' }, 400);
     if (!updatedBy || typeof updatedBy !== 'string')
@@ -454,11 +482,48 @@ export function createRouter(ctx: AppContext): (req: IncomingMessage, res: Serve
       expected ?? null,
       newValue,
       updatedBy,
-      ttl,
+      optionalTtlSeconds(body),
     );
     if (swapped) return json(res, { swapped: true });
     const current = ctx.state.get(params.namespace, params.key);
     json(res, { swapped: false, current });
+  });
+
+  route('POST', '/api/state/v2/:namespace/:key/cas', async (req, res, params) => {
+    const body = await readBody(req);
+    const operation = body.operation;
+    if (operation !== 'set' && operation !== 'delete') {
+      throw new ValidationError('"operation" must be "set" or "delete".');
+    }
+
+    const generation = expectedGeneration(body);
+    if (operation === 'delete') {
+      rejectUnknownFields(body, new Set(['expected_generation', 'operation']));
+      return json(
+        res,
+        ctx.state.compareGeneration(params.namespace, params.key, generation, { type: 'delete' }),
+      );
+    }
+
+    rejectUnknownFields(
+      body,
+      new Set(['expected_generation', 'operation', 'value', 'updated_by', 'ttl_seconds']),
+    );
+    if (typeof body.value !== 'string') {
+      throw new ValidationError('"value" is required and must be a string.');
+    }
+    if (typeof body.updated_by !== 'string' || !body.updated_by.trim()) {
+      throw new ValidationError('"updated_by" is required and must be a non-empty string.');
+    }
+    json(
+      res,
+      ctx.state.compareGeneration(params.namespace, params.key, generation, {
+        type: 'set',
+        value: body.value,
+        updatedBy: body.updated_by,
+        ttlSeconds: optionalTtlSeconds(body),
+      }),
+    );
   });
 
   route('DELETE', '/api/messages', (_req, res) => {

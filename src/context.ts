@@ -48,7 +48,7 @@ export function createContext(dbOptions?: DbOptions): AppContext {
   const channels = new ChannelService(db, events);
   const messages = new MessageService(db, events);
   const state = new StateService(db, events);
-  const cleanup = new CleanupService(db, retentionDays, feedRetentionDays);
+  const cleanup = new CleanupService(db, retentionDays, feedRetentionDays, state);
   const rateLimiter = new RateLimiter();
   const feed = new FeedService(db, events);
   const branches = new BranchService(db, events);

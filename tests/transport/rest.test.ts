@@ -395,6 +395,122 @@ describe('REST API error cases', () => {
     });
   });
 
+  describe('versioned state generation API', () => {
+    it('gets never-seen state and performs typed set/delete transitions', async () => {
+      const absent = await get('/api/state/v2/rest-generation/key');
+      expect(absent.status).toBe(200);
+      expect(absent.body).toEqual({ generation: 0, present: false, entry: null });
+
+      const setResult = await post('/api/state/v2/rest-generation/key/cas', {
+        expected_generation: 0,
+        operation: 'set',
+        value: '',
+        updated_by: 'rest-owner',
+        ttl_seconds: 60,
+      });
+      expect(setResult.status).toBe(200);
+      expect(Object.keys(setResult.body).sort()).toEqual(['predecessor', 'successor', 'swapped']);
+      expect(setResult.body.predecessor).toEqual({
+        generation: 0,
+        present: false,
+        entry: null,
+      });
+      expect(setResult.body.successor).toMatchObject({
+        generation: 1,
+        present: true,
+        entry: { value: '', updated_by: 'rest-owner' },
+      });
+      const legacyPresent = await get('/api/state/rest-generation/key');
+      expect(Object.keys(legacyPresent.body).sort()).toEqual([
+        'expires_at',
+        'key',
+        'namespace',
+        'updated_at',
+        'updated_by',
+        'value',
+      ]);
+
+      const deleted = await post('/api/state/v2/rest-generation/key/cas', {
+        expected_generation: 1,
+        operation: 'delete',
+      });
+      expect(deleted.status).toBe(200);
+      expect(deleted.body.predecessor).toMatchObject({ generation: 1, present: true });
+      expect(deleted.body.successor).toEqual({
+        generation: 2,
+        present: false,
+        entry: null,
+      });
+
+      const legacy = await get('/api/state/rest-generation/key');
+      expect(legacy.status).toBe(404);
+      const tombstone = await get('/api/state/v2/rest-generation/key');
+      expect(tombstone.body).toEqual({ generation: 2, present: false, entry: null });
+    });
+
+    it('returns the exact current state on mismatch without mutation', async () => {
+      const current = await post('/api/state/v2/rest-mismatch/key/cas', {
+        expected_generation: 0,
+        operation: 'set',
+        value: 'foreign',
+        updated_by: 'foreign-owner',
+      });
+      const mismatch = await post('/api/state/v2/rest-mismatch/key/cas', {
+        expected_generation: 0,
+        operation: 'delete',
+      });
+      expect(mismatch.status).toBe(200);
+      expect(mismatch.body).toEqual({
+        swapped: false,
+        predecessor: current.body.successor,
+        successor: current.body.successor,
+      });
+    });
+
+    it('strictly rejects invalid generations and ambiguous or private fields', async () => {
+      const invalidBodies = [
+        { expected_generation: -1, operation: 'delete' },
+        { expected_generation: 1.5, operation: 'delete' },
+        { expected_generation: '0', operation: 'delete' },
+        { expected_generation: 0, operation: 'unknown' },
+        { expected_generation: 0, operation: 'delete', value: 'ambiguous' },
+        { expected_generation: 0, operation: 'set', updated_by: 'owner' },
+        {
+          expected_generation: 0,
+          operation: 'set',
+          value: 'x',
+          updated_by: 'owner',
+          ttl_seconds: 0,
+        },
+        {
+          expected_generation: 0,
+          operation: 'set',
+          value: 'x',
+          updated_by: 'owner',
+          generation: 99,
+        },
+        {
+          expected_generation: 0,
+          operation: 'set',
+          value: 'x',
+          updated_by: 'owner',
+          updated_at: 'client-time',
+        },
+      ];
+
+      for (const body of invalidBodies) {
+        const result = await post('/api/state/v2/rest-invalid/key/cas', body);
+        expect(result.status).toBe(422);
+        expect(result.body.error).toBeTruthy();
+      }
+      expect((await get('/api/state/v2/rest-invalid/key')).body).toEqual({
+        generation: 0,
+        present: false,
+        entry: null,
+      });
+    });
+  });
+
   // -------------------------------------------------------------------------
   // Branches
   // -------------------------------------------------------------------------

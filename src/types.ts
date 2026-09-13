@@ -106,8 +106,30 @@ export interface StateEntry {
   readonly value: string;
   readonly updated_by: string;
   readonly updated_at: string;
-  /** ISO timestamp; null/undefined means never expires. Lazy-deleted on read. */
+  /** ISO timestamp; null/undefined means never expires. Lazily tombstoned on read. */
   readonly expires_at?: string | null;
+}
+
+/** Server-owned incarnation state for one namespace/key pair. */
+export interface StateVersion {
+  readonly generation: number;
+  readonly present: boolean;
+  readonly entry: StateEntry | null;
+}
+
+export type StateTransitionIntent =
+  | {
+      readonly type: 'set';
+      readonly value: string;
+      readonly updatedBy: string;
+      readonly ttlSeconds?: number;
+    }
+  | { readonly type: 'delete' };
+
+export interface StateGenerationTransitionResult {
+  readonly swapped: boolean;
+  readonly predecessor: StateVersion;
+  readonly successor: StateVersion;
 }
 
 // ---------------------------------------------------------------------------

@@ -92,6 +92,7 @@ function getCategoryFingerprints(ctx: AppContext): CategoryFingerprints {
        COALESCE((SELECT COUNT(*) FROM state), 0)
          || ':' || COALESCE((SELECT MAX(rowid) FROM state), 0)
          || ':' || COALESCE((SELECT MAX(updated_at) FROM state), '')
+         || ':' || COALESCE((SELECT TOTAL(generation) FROM state), 0)
        AS state_fp,
        COALESCE((SELECT MAX(id) FROM feed_events), 0)
        AS feed_fp,

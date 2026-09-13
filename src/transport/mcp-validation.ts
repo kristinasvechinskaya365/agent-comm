@@ -15,6 +15,14 @@ export function requireString(args: Record<string, unknown>, key: string): strin
   return val;
 }
 
+export function requireStringValue(args: Record<string, unknown>, key: string): string {
+  const val = args[key];
+  if (typeof val !== 'string') {
+    throw new ValidationError(`"${key}" is required and must be a string.`);
+  }
+  return val;
+}
+
 export function optString(args: Record<string, unknown>, key: string): string | undefined {
   const val = args[key];
   if (val === undefined || val === null) return undefined;
@@ -28,6 +36,31 @@ export function requireNumber(args: Record<string, unknown>, key: string): numbe
     throw new ValidationError(`"${key}" is required and must be a number.`);
   }
   return val;
+}
+
+export function requireSafeNonNegativeInteger(args: Record<string, unknown>, key: string): number {
+  const val = args[key];
+  if (!Number.isSafeInteger(val) || (val as number) < 0) {
+    throw new ValidationError(`"${key}" must be a non-negative safe integer.`);
+  }
+  return val as number;
+}
+
+export function optPositiveNumber(args: Record<string, unknown>, key: string): number | undefined {
+  const val = args[key];
+  if (val === undefined) return undefined;
+  if (typeof val !== 'number' || !Number.isFinite(val) || val <= 0) {
+    throw new ValidationError(`"${key}" must be a positive number.`);
+  }
+  return val;
+}
+
+export function rejectUnknownFields(
+  args: Record<string, unknown>,
+  allowed: ReadonlySet<string>,
+): void {
+  const unknown = Object.keys(args).find((key) => !allowed.has(key));
+  if (unknown) throw new ValidationError(`Unknown field: "${unknown}".`);
 }
 
 export function optNumber(args: Record<string, unknown>, key: string): number | undefined {

@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.12] - 2026-09-13
+
+### Added
+
+- **Server-owned state generations and durable tombstones.** Every successful state set, value-CAS, delete, TTL expiry, namespace deletion, and cleanup transition now advances one shared safe-integer generation without accepting a client-supplied generation. Schema migration v7 maps existing live rows to generation 1 without deleting data.
+- **Versioned state APIs.** REST adds `GET /api/state/v2/:namespace/:key` and `POST /api/state/v2/:namespace/:key/cas`; MCP `comm_state` adds `get_v2` and `cas_v2`. Generation CAS returns exact predecessor/successor state and leaves foreign replacements untouched on mismatch.
+
+### Compatibility
+
+- Legacy REST, MCP, and library state get/set/delete/value-CAS shapes remain available. Legacy reads continue to project only present entries; all legacy mutations now share the generation transition path.
+
 ## [1.3.11] - 2026-04-15
 
 ### Fixed

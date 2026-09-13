@@ -19,7 +19,7 @@ export { createDb, type Db, type DbOptions } from './storage/database.js';
 export { AgentService } from './domain/agents.js';
 export { ChannelService } from './domain/channels.js';
 export { MessageService } from './domain/messages.js';
-export { StateService } from './domain/state.js';
+export { StateService, MAX_STATE_GENERATION } from './domain/state.js';
 export { FeedService } from './domain/feed.js';
 export { BranchService } from './domain/branches.js';
 export { CleanupService } from './domain/cleanup.js';
@@ -39,6 +39,9 @@ export type {
   MessageRead,
   ThreadBranch,
   StateEntry,
+  StateVersion,
+  StateTransitionIntent,
+  StateGenerationTransitionResult,
   EventType,
   CommEvent,
   FeedEventType,

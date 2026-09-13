@@ -224,28 +224,42 @@ export const tools: ToolDefinition[] = [
   {
     name: 'comm_state',
     description:
-      'Shared key-value state. Actions: "set" (optionally with ttl_seconds for auto-expiry), "get", "list", "delete", "cas" (atomic compare-and-swap). Use ttl_seconds when claiming locks (e.g. playwright instances) so a dead agent does not hold the lock forever.',
+      'Shared key-value state. Legacy actions: "set", "get", "list", "delete", "cas". Generation-safe v2 actions: "get_v2", "cas_v2". Use ttl_seconds for auto-expiry.',
     inputSchema: {
       type: 'object',
       properties: {
         action: {
           ...ACTION_REQUIRED,
-          enum: ['set', 'get', 'list', 'delete', 'cas'],
+          enum: ['set', 'get', 'list', 'delete', 'cas', 'get_v2', 'cas_v2'],
         },
         namespace: { type: 'string', description: 'Namespace (default: "default")' },
         key: { type: 'string', description: 'Key name (required for set/get/delete/cas)' },
-        value: { type: 'string', description: '[set] Value (JSON as string if needed)' },
+        value: {
+          type: 'string',
+          description: '[set/cas_v2 set] Value (JSON as string if needed)',
+        },
         ttl_seconds: {
           type: 'number',
           description:
-            '[set] Optional TTL in seconds. Entries past their TTL are lazy-deleted on the next get/list. Recommended for locks.',
+            '[set/cas/cas_v2 set] Optional positive TTL in seconds. Expiry creates a tombstone.',
         },
         expected: {
           type: ['string', 'null'],
           description: '[cas] Expected current value (null if key should not exist)',
         },
         new_value: { type: 'string', description: '[cas] New value (empty string to delete)' },
-        // ttl_seconds also applies to cas (sets TTL on the new value), not just set
+        expected_generation: {
+          type: 'integer',
+          minimum: 0,
+          maximum: Number.MAX_SAFE_INTEGER,
+          description: '[cas_v2] Exact server-owned generation returned by get_v2',
+        },
+        operation: {
+          type: 'string',
+          enum: ['set', 'delete'],
+          description: '[cas_v2] Typed transition intent',
+        },
+        // ttl_seconds also applies to cas/cas_v2 sets, not just set
         prefix: { type: 'string', description: '[list] Filter by key prefix' },
       },
       required: ['action'],

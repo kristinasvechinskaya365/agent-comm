@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import type { AppContext } from '../../src/context.js';
 import { createTestContext } from '../helpers.js';
-import { createToolHandler } from '../../src/transport/mcp.js';
+import { createToolHandler, tools } from '../../src/transport/mcp.js';
 
 describe('MCP Tool Handler', () => {
   let ctx: AppContext;
@@ -139,6 +139,118 @@ describe('MCP Tool Handler', () => {
         new_value: '3',
       }) as { swapped: boolean };
       expect(fail.swapped).toBe(false);
+    });
+
+    it('keeps legacy CAS delete interoperable with versioned tombstones', () => {
+      handle('comm_register', { name: 'legacy-delete-agent' });
+      handle('comm_state', { action: 'set', key: 'legacy-delete', value: 'held' });
+      expect(
+        handle('comm_state', {
+          action: 'cas',
+          key: 'legacy-delete',
+          expected: 'held',
+          new_value: '',
+        }),
+      ).toEqual({ swapped: true });
+      expect(handle('comm_state', { action: 'get', key: 'legacy-delete' })).toBeNull();
+      expect(handle('comm_state', { action: 'get_v2', key: 'legacy-delete' })).toEqual({
+        generation: 2,
+        present: false,
+        entry: null,
+      });
+    });
+
+    it('exposes explicit get_v2 and cas_v2 generation actions', () => {
+      const registered = handle('comm_register', { name: 'generation-agent' }) as { id: string };
+      expect(
+        handle('comm_state', { action: 'get_v2', namespace: 'leases', key: 'camera' }),
+      ).toEqual({ generation: 0, present: false, entry: null });
+
+      const setResult = handle('comm_state', {
+        action: 'cas_v2',
+        namespace: 'leases',
+        key: 'camera',
+        expected_generation: 0,
+        operation: 'set',
+        value: '',
+        ttl_seconds: 60,
+      }) as Record<string, unknown>;
+      expect(Object.keys(setResult).sort()).toEqual(['predecessor', 'successor', 'swapped']);
+      expect(setResult).toMatchObject({
+        swapped: true,
+        predecessor: { generation: 0, present: false, entry: null },
+        successor: {
+          generation: 1,
+          present: true,
+          entry: { value: '', updated_by: registered.id },
+        },
+      });
+
+      const deleteResult = handle('comm_state', {
+        action: 'cas_v2',
+        namespace: 'leases',
+        key: 'camera',
+        expected_generation: 1,
+        operation: 'delete',
+      });
+      expect(deleteResult).toMatchObject({
+        swapped: true,
+        predecessor: { generation: 1, present: true },
+        successor: { generation: 2, present: false, entry: null },
+      });
+    });
+
+    it('strictly rejects ambiguous cas_v2 intents and client-owned metadata', () => {
+      handle('comm_register', { name: 'generation-validator' });
+      const invalid = [
+        { expected_generation: -1, operation: 'delete' },
+        { expected_generation: 0.5, operation: 'delete' },
+        { expected_generation: '0', operation: 'delete' },
+        { expected_generation: 0, operation: 'delete', value: 'ambiguous' },
+        { expected_generation: 0, operation: 'set' },
+        { expected_generation: 0, operation: 'set', value: 'x', ttl_seconds: 0 },
+        { expected_generation: 0, operation: 'set', value: 'x', updated_by: 'spoofed' },
+        { expected_generation: 0, operation: 'set', value: 'x', generation: 8 },
+        { expected_generation: 0, operation: 'set', value: 'x', updated_at: 'client-time' },
+      ];
+      for (const args of invalid) {
+        expect(() =>
+          handle('comm_state', {
+            action: 'cas_v2',
+            namespace: 'invalid',
+            key: 'key',
+            ...args,
+          }),
+        ).toThrow();
+      }
+      expect(handle('comm_state', { action: 'get_v2', namespace: 'invalid', key: 'key' })).toEqual({
+        generation: 0,
+        present: false,
+        entry: null,
+      });
+    });
+
+    it('publishes integer generation fields and operation enum in the MCP schema', () => {
+      const stateTool = tools.find((tool) => tool.name === 'comm_state')!;
+      const properties = stateTool.inputSchema.properties as Record<
+        string,
+        Record<string, unknown>
+      >;
+      expect(properties.action.enum).toEqual([
+        'set',
+        'get',
+        'list',
+        'delete',
+        'cas',
+        'get_v2',
+        'cas_v2',
+      ]);
+      expect(properties.expected_generation).toMatchObject({
+        type: 'integer',
+        minimum: 0,
+        maximum: Number.MAX_SAFE_INTEGER,
+      });
+      expect(properties.operation.enum).toEqual(['set', 'delete']);
     });
   });
 

@@ -8,6 +8,7 @@
 
 import { CleanupService as KitCleanupService } from 'agent-common';
 import type { Db } from '../storage/database.js';
+import { StateService } from './state.js';
 
 const DEFAULT_RETENTION_DAYS = 7;
 const DEFAULT_FEED_RETENTION_DAYS = 30;
@@ -27,14 +28,20 @@ export interface StaleCleanupStats extends CleanupStats {
 
 export class CleanupService extends KitCleanupService<CleanupStats> {
   private readonly feedRetentionDays: number;
+  private readonly state: StateService;
 
   constructor(
     db: Db,
     retentionDays: number = DEFAULT_RETENTION_DAYS,
     feedRetentionDays: number = DEFAULT_FEED_RETENTION_DAYS,
+    state: StateService = new StateService(db),
   ) {
-    super(db, { retentionDays });
+    // Delay the base timer's initial run until the state dependency is assigned.
+    super(db, { retentionDays, autoStart: false });
     this.feedRetentionDays = feedRetentionDays;
+    this.state = state;
+    this.resetOnStartup();
+    this.startTimer();
   }
 
   /**
@@ -84,9 +91,7 @@ export class CleanupService extends KitCleanupService<CleanupStats> {
       [cutoff],
     ).changes;
 
-    const state = this.db.run(`DELETE FROM state WHERE updated_at < datetime('now', ?)`, [
-      cutoff,
-    ]).changes;
+    const state = this.state.tombstoneOlderThan(this.retentionDays);
 
     const feed_events = this.cleanupFeedEvents();
 
@@ -161,10 +166,7 @@ export class CleanupService extends KitCleanupService<CleanupStats> {
       ids,
     ).changes;
 
-    const state = this.db.run(
-      `DELETE FROM state WHERE updated_by IN (${placeholders})`,
-      ids,
-    ).changes;
+    const state = this.state.tombstoneByUpdatedBy(ids);
 
     const agents = this.db.run(`DELETE FROM agents WHERE id IN (${placeholders})`, ids).changes;
 
@@ -186,7 +188,7 @@ export class CleanupService extends KitCleanupService<CleanupStats> {
     const channels = this.db.run(`DELETE FROM channels`).changes;
     const agents = this.db.run(`DELETE FROM agents`).changes;
     const reads = 0;
-    const state = this.db.run(`DELETE FROM state`).changes;
+    const state = this.state.tombstoneAll();
 
     process.stderr.write(
       `[agent-comm] Full purge: ${agents} agents, ${messages} messages, ${channels} channels, ${state} state entries\n`,
